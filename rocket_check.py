@@ -1,13 +1,13 @@
 """
-RocketAlert — GitHub Actions Check
-רץ כל דקה דרך GitHub Actions
-שולח לטלגרם רק אם יש משהו חדש
+RocketAlert — GitHub Actions + Termux
 """
-import requests, json, time, urllib.request, re, os
+import requests, json, urllib.request, re, time, os
 from datetime import datetime, timedelta
 
 TG_BOT_TOKEN = "8545041316:AAHYqIskfkcDwgMTw4Qk5tRmQqrNf31BPao"
 TG_CHAT_ID   = -1003584552650
+STATE_FILE   = "state.json"
+HISTORY_WINDOW_SEC = 180
 
 OREF_ACTIVE  = "https://www.oref.org.il/WarningMessages/alert/alerts.json"
 OREF_HISTORY = "https://www.oref.org.il/warningMessages/alert/History/AlertsHistory.json"
@@ -20,31 +20,10 @@ OREF_HEADERS = {
 }
 
 END_CATS = {10, 11, 12}
-UAV_CATS = {3, 4, 17}
+UAV_CATS  = {3, 4, 17}
 
-TG_CHANNELS = [
-    "oref_updates", "tzeva_adom_israel", "israelradar",
-    "kann_news", "newsisrael13",
-]
-
-RSS_FEEDS = [
-    "https://rss.walla.co.il/feed/22",
-    "https://www.ynet.co.il/Integration/StoryRss2.xml",
-    "https://www.timesofisrael.com/feed/",
-]
-
-LAUNCH_KEYWORDS = [
-    "זוהו שיגורים", "שיגורים לעבר", "שיגורים בדרך",
-    "טיל בליסטי", "מטח רקטות", "תזוזת משגרים",
-    "launches detected", "ballistic missile", "rocket barrage",
-    "IRGC", "איראן", "חיזבאללה",
-]
-
-STATE_FILE = "state.json"
-
-# ── חלון זמן ──
-# בודק היסטוריה של 3 דקות אחורה (במקום 5) כדי לא לפספס אזעקות קצרות
-HISTORY_WINDOW_SEC = 180
+TG_CHANNELS = ["oref_updates", "tzeva_adom_israel", "israelradar", "kann_news", "newsisrael13"]
+EARLY_WARNING_KEYWORDS = ["התרעה מקדימה", "זיהוי שיגורים", "שיגורים לעבר", "טיל בליסטי", "מטח רקטות"]
 
 def load_state():
     try:
@@ -60,9 +39,9 @@ def save_state(state):
 def tg_send(text):
     try:
         url  = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
-        data = {"chat_id": TG_CHAT_ID, "text": text}
-        r = requests.post(url, json=data, timeout=10)
-        print(f"TG sent: {text[:60]}")
+        data = {"chat_id": TG_CHAT_ID, "text": text, "parse_mode": "HTML"}
+        requests.post(url, json=data, timeout=10)
+        print(f"TG: {text[:80]}")
     except Exception as e:
         print(f"TG error: {e}")
 
@@ -85,162 +64,126 @@ def extract_areas(item):
             areas.append(val.strip())
     return areas
 
-def main():
-    state = load_state()
-    sent  = set(state.get("sent_alerts", []))
-    now   = datetime.now()
+def threat_name(cat):
+    if cat in UAV_CATS: return "כטב״מ"
+    if cat == 13: return "טיל בליסטי"
+    return "רקטות"
 
+def threat_emoji(cat):
+    if cat in UAV_CATS: return "🛸"
+    if cat == 13: return "💥"
+    return "🚨"
+
+def check(state):
+    sent = set(state.get("sent_alerts", []))
+    now  = datetime.now()
     session = requests.Session()
     session.headers.update(OREF_HEADERS)
 
-    # ── 1. alerts.json — אזעקות פעילות עכשיו ──
+    # 1. אזעקות פעילות
     try:
         r = session.get(OREF_ACTIVE, timeout=5)
         r.encoding = "utf-8-sig"
         raw = safe_json(r.text)
         if raw:
-            root_cat = int(raw.get("cat", raw.get("category", 0))) \
-                       if isinstance(raw, dict) else 0
+            root_cat = int(raw.get("cat", raw.get("category",0))) if isinstance(raw,dict) else 0
             if root_cat not in END_CATS:
-                items = raw if isinstance(raw, list) else raw.get("data", [])
+                items = raw if isinstance(raw,list) else raw.get("data",[])
                 if isinstance(items, list) and items:
                     new_areas = []
                     for a in items:
-                        area = a if isinstance(a, str) else a.get("data", "")
+                        area = a if isinstance(a,str) else a.get("data","")
                         key  = f"alert:{area}"
                         if area and key not in sent:
                             new_areas.append(area)
                             sent.add(key)
                     if new_areas:
-                        threat = "UAV" if root_cat in UAV_CATS else \
-                                 "BALLISTIC" if root_cat == 13 else "ROCKET"
-                        cities = ", ".join(new_areas[:8])
-                        extra  = f" (+{len(new_areas)-8})" if len(new_areas) > 8 else ""
-                        tg_send(f"🚨 אזעקה [{threat}]:\n{cities}{extra}")
+                        emoji = threat_emoji(root_cat)
+                        name  = threat_name(root_cat)
+                        cities = "\n• ".join([", ".join(new_areas[i:i+8]) for i in range(0, len(new_areas), 8)])
+                        extra = f"\n<i>+{len(new_areas)-8} נוספים</i>" if len(new_areas) > 8 else ""
+                        tg_send(f"{emoji} <b>אזעקה — {name}</b>\n• {cities}{extra}")
     except Exception as e:
-        print(f"alerts error: {e}")
+        print(f"active error: {e}")
 
-    # ── 2. AlertsHistory.json — היסטוריה של 3 דקות ──
-    # זה מבטיח שאזעקות קצרות שפספסנו ב-alerts.json יתפסו כאן
+    # 2. היסטוריה — קיבוץ לפי אזור
     try:
         r2 = session.get(OREF_HISTORY, timeout=10)
         r2.encoding = "utf-8-sig"
         hist = safe_json(r2.text)
         if isinstance(hist, list):
-            last_dt_str = state.get("last_alert_dt", "")
-            last_dt = datetime.strptime(last_dt_str, "%Y-%m-%d %H:%M:%S") \
-                      if last_dt_str else now - timedelta(seconds=HISTORY_WINDOW_SEC + 30)
-
-            new_areas = []
-            newest    = None
-
+            last_dt_str = state.get("last_alert_dt","")
+            last_dt = datetime.strptime(last_dt_str, "%Y-%m-%d %H:%M:%S") if last_dt_str else now - timedelta(seconds=HISTORY_WINDOW_SEC+30)
+            by_zone = {}
+            newest  = None
             for it in hist:
-                if not isinstance(it, dict):
-                    continue
+                if not isinstance(it, dict): continue
                 try:
-                    idt = datetime.strptime(it.get("alertDate", ""), "%Y-%m-%d %H:%M:%S")
-                except:
-                    continue
-
-                # עצור אם האזעקה ישנה מחלון הזמן
-                if (now - idt).total_seconds() > HISTORY_WINDOW_SEC:
-                    break
-
-                cat = int(it.get("category", 0))
-                if cat in END_CATS:
-                    continue
-
-                # דלג על מה שכבר שלחנו
-                if idt <= last_dt:
-                    continue
-
-                if newest is None:
-                    newest = idt
-
+                    idt = datetime.strptime(it.get("alertDate",""), "%Y-%m-%d %H:%M:%S")
+                except: continue
+                if (now - idt).total_seconds() > HISTORY_WINDOW_SEC: break
+                cat = int(it.get("category",0))
+                if cat in END_CATS: continue
+                if idt <= last_dt: continue
+                if newest is None: newest = idt
+                zone = it.get("areaname", it.get("area", "כללי"))
+                zkey = f"{zone}:{cat}"
                 for a in extract_areas(it):
                     key = f"hist:{a}:{idt.strftime('%Y%m%d%H%M')}"
                     if key not in sent:
-                        new_areas.append((a, cat))
+                        by_zone.setdefault(zkey, {"zone": zone, "cat": cat, "areas": []})
+                        by_zone[zkey]["areas"].append(a)
                         sent.add(key)
-
             if newest:
                 state["last_alert_dt"] = newest.strftime("%Y-%m-%d %H:%M:%S")
-
-            if new_areas:
-                # קבץ לפי סוג איום
-                by_threat = {}
-                for area, cat in new_areas:
-                    threat = "UAV" if cat in UAV_CATS else \
-                             "BALLISTIC" if cat == 13 else "ROCKET"
-                    by_threat.setdefault(threat, []).append(area)
-
-                for threat, areas in by_threat.items():
-                    cities = ", ".join(set(areas))[:250]
-                    tg_send(f"🔔 אזעקה [{threat}]:\n{cities}")
-
+            for data in by_zone.values():
+                areas  = list(set(data["areas"]))
+                emoji  = threat_emoji(data["cat"])
+                name   = threat_name(data["cat"])
+                cities = ", ".join(areas[:20])
+                extra  = f" (+{len(areas)-20})" if len(areas) > 20 else ""
+                tg_send(f"{emoji} <b>אזעקה — {name}</b>\n📍 {data['zone']}\n{cities}{extra}")
     except Exception as e:
         print(f"history error: {e}")
 
-    # ── 3. בדיקת מודיעין ──
-    warnings = []
-
+    # 3. התרעה מקדימה
     for ch in TG_CHANNELS:
         try:
             url = f"https://t.me/s/{ch}"
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            req = urllib.request.Request(url, headers={"User-Agent":"Mozilla/5.0"})
             with urllib.request.urlopen(req, timeout=6) as resp:
                 html = resp.read().decode("utf-8", errors="ignore")
-            blocks = re.findall(
-                r'<time[^>]*datetime="([^"]+)".*?tgme_widget_message_text[^>]*>(.*?)</div>',
-                html, re.DOTALL)
+            blocks = re.findall(r'<time[^>]*datetime="([^"]+)".*?tgme_widget_message_text[^>]*>(.*?)</div>', html, re.DOTALL)
             for dt_str, msg_html in blocks:
                 text = re.sub(r'<[^>]+>', '', msg_html).strip()
-                if not text:
-                    continue
+                if not text: continue
                 try:
-                    msg_dt = datetime.fromisoformat(
-                        dt_str.replace("Z", "+00:00")).replace(tzinfo=None)
+                    msg_dt = datetime.fromisoformat(dt_str.replace("Z","+00:00")).replace(tzinfo=None)
                     msg_dt += timedelta(hours=3)
-                    if (now - msg_dt).total_seconds() > 600:
-                        continue
-                except:
-                    pass
-                for kw in LAUNCH_KEYWORDS:
+                    if (now - msg_dt).total_seconds() > 600: continue
+                except: pass
+                for kw in EARLY_WARNING_KEYWORDS:
                     if kw in text:
-                        warnings.append(f"[{ch}] {text[:150]}")
+                        key = f"warn:{text[:60]}"
+                        if key not in sent:
+                            sent.add(key)
+                            tg_send(f"📡 <b>התרעה מקדימה</b>\n{text[:300]}")
                         break
-        except:
-            continue
-
-    for feed in RSS_FEEDS:
-        try:
-            req = urllib.request.Request(feed, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                text = resp.read().decode("utf-8", errors="ignore")
-            titles = re.findall(r'<title>([^<]{10,150})</title>', text)
-            for t in titles[1:]:
-                for kw in LAUNCH_KEYWORDS:
-                    if kw.lower() in t.lower():
-                        warnings.append(f"[RSS] {t[:150]}")
-                        break
-        except:
-            continue
-
-    if warnings:
-        first = warnings[0]
-        if first != state.get("last_warn", ""):
-            state["last_warn"] = first
-            if any(kw in first for kw in ["תזוזת משגרים", "launcher"]):
-                emoji = "📡"
-            elif any(kw in first for kw in ["איראן", "IRGC", "חיזבאללה"]):
-                emoji = "🔴"
-            else:
-                emoji = "⚠️"
-            tg_send(f"{emoji} {first}")
+        except: continue
 
     state["sent_alerts"] = list(sent)[-300:]
     save_state(state)
-    print(f"Done. Warnings found: {len(warnings)}, Sent keys: {len(sent)}")
+    print(f"Done {datetime.now().strftime('%H:%M:%S')}")
+
+def main():
+    state = load_state()
+    is_actions = os.environ.get("GITHUB_ACTIONS") == "true"
+    if is_actions:
+        check(state)
+    else:
+        while True:
+            check(state)
+            time.sleep(3)
 
 if __name__ == "__main__":
     main()
