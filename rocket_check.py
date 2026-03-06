@@ -140,9 +140,8 @@ def check(state):
                 areas  = list(set(data["areas"]))
                 emoji  = threat_emoji(data["cat"])
                 name   = threat_name(data["cat"])
-                cities = ", ".join(areas[:20])
-                extra  = f" (+{len(areas)-20})" if len(areas) > 20 else ""
-                tg_send(f"{emoji} <b>אזעקה — {name}</b>\n📍 {data['zone']}\n{cities}{extra}")
+                cities = ", ".join(areas)
+                tg_send(f"{emoji} <b>אזעקה — {name}</b>\n📍 {data['zone']}\n{cities}")
     except Exception as e:
         print(f"history error: {e}")
 
