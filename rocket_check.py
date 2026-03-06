@@ -7,7 +7,8 @@ import requests, json, time, urllib.request, re, os
 from datetime import datetime, timedelta
 
 TG_BOT_TOKEN = "8545041316:AAHYqIskfkcDwgMTw4Qk5tRmQqrNf31BPao"
-TG_CHAT_ID   = 1632096542
+TG_CHAT_ID = -1003584552650
+
 
 OREF_ACTIVE  = "https://www.oref.org.il/WarningMessages/alert/alerts.json"
 OREF_HISTORY = "https://www.oref.org.il/warningMessages/alert/History/AlertsHistory.json"
