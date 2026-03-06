@@ -1,42 +1,8 @@
-name: RocketAlert Monitor
-
+name: Disabled
 on:
-  schedule:
-    - cron: '*/5 * * * *'  # כל 5 דקות
-  workflow_dispatch:        # הפעלה ידנית
-
-permissions:
-  actions: write
-  contents: read
-
+  workflow_dispatch:
 jobs:
-  monitor:
+  placeholder:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-
-      - name: Restore state cache
-        uses: actions/cache@v3
-        with:
-          path: state.json
-          key: rocket-state-${{ github.run_id }}
-          restore-keys: |
-            rocket-state-
-
-      - name: Setup Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
-
-      - name: Install dependencies
-        run: pip install requests
-
-      - name: Run monitor
-        run: python rocket_check.py
-
-      - name: Save state cache
-        if: always()
-        uses: actions/cache/save@v3
-        with:
-          path: state.json
-          key: rocket-state-${{ github.run_id }}
+      - run: echo "disabled"
